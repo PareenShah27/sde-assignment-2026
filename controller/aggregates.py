@@ -11,7 +11,7 @@ makes "one shared cohort object" cheap: cohorts are views over cells, not separa
 Cubes, per workflow, per sim day (day 0 == D0, history days are negative):
   pick[day]  (24 hour, 252 code, n_caller_id, 2)          dials, connected            -> pickup / caller-ID
   eng[day]   (252 code, n_welcome, n_voice, n_prompt, 3)  connected, engaged, halluc_flag -> engagement
-  hal[day]   (24 hour, n_prompt, 2)                       connected, halluc_flag        -> incident detection
+  hal[day]   (24 hour, n_prompt, 3)                       connected, halluc_flag, engaged -> incidents, verification
   leads[day] (252,) leads uploaded;  concl[campaign day] (252,) leads concluded          -> affected leads
 
 Crash safety: aggregates are a pure function of the ordered event log. We snapshot them (atomic rename)
@@ -98,6 +98,21 @@ class WfAgg:
             if d0 <= d <= d1:
                 out += a
         return out
+
+    def window(self, m0: int, m1: int) -> dict:
+        """Workflow-level KPIs for sim minutes [m0, m1) at hour granularity: dials, connected, engaged."""
+        dials = conn = eng = 0
+        for d in range(m0 // 1440, (m1 - 1) // 1440 + 1):
+            P, H = self.pick.get(d), self.hal.get(d)
+            for h in range(24):
+                t = d * 1440 + h * 60
+                if not (m0 <= t < m1):
+                    continue
+                if P is not None:
+                    dials += int(P[h, :, :, 0].sum()); conn += int(P[h, :, :, 1].sum())
+                if H is not None:
+                    eng += int(H[h, :, 2].sum())
+        return {"dials": dials, "connected": conn, "engaged": eng}
 
     def eng_sum(self, d0: int, d1: int, weights: dict[int, float] | None = None) -> np.ndarray:
         out = np.zeros((NCODE, self.nW, self.nV, self.nP, 3), dtype=np.float64)
@@ -197,9 +212,10 @@ class Aggregates:
                 np.add.at(E, (code[c], wi[c], vi[c], pi[c], 0), 1)
                 np.add.at(E, (code[c], wi[c], vi[c], pi[c], 1), eng[c])
                 np.add.at(E, (code[c], wi[c], vi[c], pi[c], 2), flag[c])
-                H = w._arr(w.hal, d, (24, w.nP, 2))
+                H = w._arr(w.hal, d, (24, w.nP, 3))
                 np.add.at(H, (hour[c], pi[c], 0), 1)
                 np.add.at(H, (hour[c], pi[c], 1), flag[c])
+                np.add.at(H, (hour[c], pi[c], 2), eng[c])
         e = eng == 1
         for cd in np.unique(cday[e]):
             s = e & (cday == cd)

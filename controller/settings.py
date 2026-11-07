@@ -31,7 +31,10 @@ HARM_TOLERANCE = 0.002       # never propose an allocation whose posterior-mean 
 SCHED_BETA = 2.0             # weight = (relative pickup at hour)^beta
 SCHED_MIN_W, SCHED_MAX_W = 0.25, 4.0
 SCHED_MIN_DIALS = 1500       # per cohort, across history, before we give it its own hour table
-SCHED_MIN_GAIN = 0.01        # relative pickup gain the dry run must show before proposing (1%)
+SCHED_MIN_GAIN = 0.01        # cross-fitted gain in leads concluded needed to introduce cohorts JUST for call time
+SCHED_MIN_GAIN_PIGGYBACK = 0.003  # bar when cohorts exist anyway (no extra approval or cohort churn). Calibration
+                              # on public_01: forcing the schedule on gave ~+1.4pp pickup vs a +0.4-0.7% replay
+                              # estimate, so the replay is conservative (see SUBMISSION §5).
 
 # ---- caller ID (C5)
 DID_WINDOW_HOURS = 24
@@ -57,3 +60,20 @@ ROUTINE_START_OFFSET_H = 1    # routine asks never in the approvers' first hour 
 ROUTINE_LAST_SEND_BEFORE_END_H = 3  # don't send routine asks that will likely be decided tomorrow
 VERIFY_AFTER_HOURS = 24       # post-apply verification window
 GUARDRAIL_Z = 2.5
+DID_REPROBE_SHARE = 0.02      # re-testing a number we rotated out: small enough that a still-bad number
+                              # cannot move expected caller-ID health by more than ~1.5%
+DID_MAX_SHARE = 0.60          # no single number above 60% while another has shown good pickup (load spreading)
+DID_REST_DAYS = 3             # first re-test after 3 days rest; doubles after each failed re-test
+
+
+# ---- experiment overrides: CONTROLLER_SET="SCHED_MIN_GAIN=-1,DID_PROBE_SHARE=0.03" (used for calibration runs)
+def _apply_overrides():
+    import os
+    for kv in filter(None, os.environ.get("CONTROLLER_SET", "").split(",")):
+        k, v = kv.split("=", 1)
+        if k.strip() not in globals():
+            raise SystemExit(f"CONTROLLER_SET: unknown setting {k!r}")
+        globals()[k.strip()] = type(globals()[k.strip()])(v)
+
+
+_apply_overrides()

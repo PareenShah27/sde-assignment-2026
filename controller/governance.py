@@ -49,7 +49,8 @@ class Draft:
     patch: dict               # partial config; see apply_patch
     rationale: str
     dry_run: dict
-    lift: float = 0.0         # expected relative lift on the workflow's primary KPI (honest, conservative)
+    lift: float = 0.0         # expected relative lift in leads concluded (business outcome), conservative.
+                              # KPIs are still reported separately in dry_run; this only ranks proposals.
     urgent: bool = False      # incident / rollback: may use the reserved request and skip routine timing
     risk_reducing: bool = False  # moves traffic AWAY from something measured as bad
     evidence: dict | None = None
@@ -212,13 +213,17 @@ class Governance:
         in_flight = ctl.store.proposals(workflow_id=wid, statuses=("intent", "pending", "approved"))
         approval_in_flight = [p for p in in_flight if p["route"] == "approval"]
         kinds_in_flight = {k for p in approval_in_flight for k in (p["meta"].get("kinds") or [])}
+        # If the boundary refused one of our auto-applies recently, our pre-check is wrong somewhere: stop
+        # retrying the same refused change and take the approval path for a while instead.
+        auto_blocked = any(p["route"] == "auto" and p["status"] == "auto_rejected" and p["updated_minute"] > ctl.now - 120
+                           for p in ctl.store.proposals(workflow_id=wid, statuses=("auto_rejected",)))
 
         auto, manual = [], []
         for d in drafts:
             dims = changed_dims(cur["config"], apply_patch(cur["config"], d.patch))
             if not dims:
                 continue
-            allowed = pol.get("enabled") and set(dims) <= set(pol.get("allowed_dims") or [])
+            allowed = pol.get("enabled") and set(dims) <= set(pol.get("allowed_dims") or []) and not auto_blocked
             # Our own rule (stricter than policy): auto-apply only operational dims, or moves that reduce
             # exposure to something measured as bad. Anything that introduces new customer-facing exposure asks.
             voluntary_ok = set(dims) <= OPERATIONAL or d.risk_reducing
@@ -248,9 +253,14 @@ class Governance:
         stepped = False
         if sh > limit + 1e-9:
             # Respect max_shift as a rate limit: take one step now, the planner re-emits the target next cycle.
-            new = step_toward(cur["config"], new, cohort_ids(new), AGENT_DIMS, limit - 1e-6)
-            new = clean(new)
-            stepped = True
+            # Margin under the limit because weights are rounded to 4 dp and the boundary's check is exact.
+            margin = 0.002
+            while True:
+                stepped_cfg = clean(step_toward(cur["config"], new, cohort_ids(new), AGENT_DIMS, limit - margin))
+                if max_shift(cur["config"], stepped_cfg) <= limit - 1e-6 or margin > limit / 2:
+                    break
+                margin *= 2
+            new, stepped = stepped_cfg, True
         dims = changed_dims(cur["config"], new)
         if not dims:
             return
@@ -292,7 +302,7 @@ class Governance:
         dims = changed_dims(cur["config"], new)
         kinds = [d.kind for d in drafts]
         lift = sum(max(d.lift, 0.0) for d in drafts)
-        impact = min(1.0, lift / 0.10)  # 1.0 == expected +10% relative on the primary KPI (see SUBMISSION §6)
+        impact = min(1.0, lift / 0.10)  # 1.0 == expected +10% leads concluded (see SUBMISSION §6)
         if any(d.urgent for d in drafts):
             impact = max(impact, 0.9)  # incident fixes go to the top of a supervisor's queue
         summary = " + ".join(d.summary for d in drafts)

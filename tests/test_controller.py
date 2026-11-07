@@ -73,6 +73,22 @@ def test_step_toward_respects_max_shift():
     assert abs(C.max_shift(a, s) - 0.2) < 1e-3
 
 
+def test_auto_step_never_exceeds_max_shift_after_rounding():
+    """Regression: a 0.2 step rounded to 4dp came out at 0.2000x and the boundary refused it every cycle."""
+    rnd = random.Random(3)
+    for _ in range(300):
+        k = rnd.randint(2, 4)
+        cur = {"allocations": {"default": {"voice": {"V1": 1}, "welcome_message": {"W1": 1},
+                                           "caller_id": C.normalised({f"D{i}": rnd.random() + 0.01 for i in range(k)})}}}
+        tgt = copy.deepcopy(cur)
+        tgt["allocations"]["default"]["caller_id"] = C.normalised({f"D{i}": rnd.random() for i in range(k)} | {"D0": 0})
+        if not tgt["allocations"]["default"]["caller_id"]:
+            continue
+        margin = 0.002
+        s = C.clean(C.step_toward(C.clean(cur), tgt, ["default"], C.AGENT_DIMS, 0.2 - margin))
+        assert C.max_shift(C.clean(cur), s) <= 0.2 + 1e-9
+
+
 # ---------------------------------------------------------------- governance crash safety
 def _voice_draft(ctl, wid="nw_renewal"):
     return Draft(wid=wid, kind="variant_allocation", summary="test voices",
@@ -157,3 +173,38 @@ def test_apply_patch_drops_tables_of_removed_cohorts():
            "prompt_version": "P1", "schedule": {"hour_weights": {"a": {"9": 1}}, "lead_preferred_hour": {}}}
     out = apply_patch(cfg, {"cohorts": []})
     assert "a" not in out["allocations"] and "a" not in out["schedule"]["hour_weights"]
+
+
+# ---------------------------------------------------------------- caller ID
+def test_did_target_excludes_unhealthy_caps_and_probes():
+    from controller.callerid import CallerID
+    dids = {"D1": {"state": "healthy"}, "D2": {"state": "unhealthy"},
+            "D3": {"state": "probing", "last": {"dials": 300, "ratio": 1.1}}, "D4": {"state": "unknown"}}
+    t = CallerID().target(dids, {"D1": 0.5, "D2": 0.5})
+    assert "D2" not in t
+    assert t["D1"] <= 0.6 + 1e-9                 # load-spreading cap
+    assert abs(t["D4"] - 0.05) < 1e-9            # unproven number probed at 5%
+    assert abs(sum(t.values()) - 1) < 1e-3
+    dids["D2"] = {"state": "probing", "reprobe": True}
+    assert abs(CallerID().target(dids, {"D1": 1})["D2"] - 0.02) < 1e-9  # re-test at 2%
+
+
+def test_did_stats_flags_a_bad_number_within_hour_cells():
+    import numpy as np
+    from controller.aggregates import WfAgg
+    from controller.callerid import did_stats, robust_stats
+    w = WfAgg("x", {"caller_id": ["D1", "D2", "D3"], "welcome_message": ["W1"], "voice": ["V1"],
+                    "prompt_version": ["P1"]})
+    rng = np.random.default_rng(0)
+    P = np.zeros((24, 252, 3, 2), dtype=np.int32)
+    for h in range(9, 21):
+        base = 0.15 if h < 15 else 0.35          # strong time-of-day effect, same for all numbers
+        for i, health in enumerate([1.0, 0.4, 1.0]):
+            P[h, 0, i, 0] = 100
+            P[h, 0, i, 1] = rng.binomial(100, base * health)
+    w.pick[0] = P
+    naive = did_stats(w, 0, 1440)
+    assert naive["D1"]["ratio"] > 1.3            # a bad number flatters the others in a naive comparison ...
+    s = robust_stats(w, 0, 1440)
+    assert s["D2"]["ratio"] < 0.6 and s["D2"]["z"] < -3
+    assert 0.8 < s["D1"]["ratio"] < 1.2          # ... which the second pass removes
