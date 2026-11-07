@@ -43,7 +43,7 @@ DID_GOOD_RATIO = 0.92        # a probed number is promoted to full rotation at >
 
 # ---- incidents (C8)
 HAL_WINDOW_HOURS = 6
-HAL_MIN_CONNECTED = 150
+HAL_MIN_CONNECTED = 80       # the p-value below does the false-positive control; this only stops tiny-n noise
 HAL_RATIO = 1.6              # flag rate at least 1.6x the prompt's/workflow's baseline ...
 HAL_P = 1e-4                 # ... and binomial tail p < 1e-4 (≈1 false alarm per 200 workflow-days at 48 checks/day)
 VALIDATION_N = 300           # 3 credits; enough to clear a 0.97 bar for a prompt with ~1% live failure rate

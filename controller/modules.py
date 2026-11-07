@@ -1,6 +1,9 @@
-"""Module wiring. Order matters: safety (incidents, caller ID) before optimisation, governance last so that
-everything planned in this cycle is batched into one request per workflow."""
+"""Module wiring. Order matters: awareness of supervisor edits first, then safety (incidents), then
+optimisation planners, and governance LAST so that everything drafted in a cycle is batched into one
+change per workflow."""
+from .governance import Governance
+from .incidents import Hallucination, SupervisorWatch
 
 
 def build_modules(ctl):
-    return []
+    return [SupervisorWatch(), Hallucination(), Governance(ctl)]

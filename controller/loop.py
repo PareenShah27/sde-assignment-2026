@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import defaultdict
 from pathlib import Path
 
 from . import settings as S
@@ -129,6 +130,7 @@ class Controller:
     def step_once(self):
         self.ingest()
         self.sync_configs()
+        self.drafts = defaultdict(list)
         for m in self.modules:
             try:
                 m.tick(self)

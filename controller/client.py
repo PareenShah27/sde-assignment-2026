@@ -26,8 +26,8 @@ class TransportError(Exception):
 
 
 class SimClient:
-    def __init__(self, base_url: str, timeout: float = 300.0, retries: int = 6):
-        self.http = httpx.Client(base_url=base_url, timeout=timeout)
+    def __init__(self, base_url: str, timeout: float = 300.0, retries: int = 6, transport=None):
+        self.http = httpx.Client(base_url=base_url, timeout=timeout, transport=transport)
         self.retries = retries
         self.calls = 0
 
