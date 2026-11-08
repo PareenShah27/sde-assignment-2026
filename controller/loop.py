@@ -7,6 +7,8 @@ at any line and restarting converges to the same state without double-applying o
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -128,10 +130,16 @@ class Controller:
 
     # ------------------------------------------------------------------ main loop
     def step_once(self):
-        self.ingest()
+        """One cycle. Its wall time is the controller's decision lag: in production, the delay between events
+        landing and the decisions that react to them (on top of the STEP_MINUTES batching)."""
+        t0 = time.time()
+        n = self.ingest()
+        t_ing = time.time() - t0
         self.sync_configs()
         self.drafts = defaultdict(list)
+        timings = {}
         for m in self.modules:
+            tm = time.time()
             try:
                 m.tick(self)
             except (SimError, TransportError) as e:
@@ -139,10 +147,24 @@ class Controller:
                 log.warning("%s failed at %s: %s", type(m).__name__, fmt_minute(self.now), e)
                 with self.store.tx():
                     self.store.alert(self.now, "warn", None, f"module_error:{type(m).__name__}", str(e)[:300])
+            timings[type(m).__name__] = time.time() - tm
         self._notifications.clear()
         self.maybe_snapshot()
+        cycle = time.time() - t0
+        with self.store.tx():
+            self.store.metric(self.now, "cycle_seconds", cycle)
+            self.store.metric(self.now, "decide_seconds", cycle - t_ing)
+            if n and t_ing > 0:
+                self.store.metric(self.now, "ingest_events_per_s", n / t_ing)
+            self.store.metric(self.now, "rss_mb", _rss_mb())
+            self.store.metric(self.now, "decisions_total", self.store.db.execute(
+                "SELECT COUNT(*) FROM decisions").fetchone()[0])
+            for k, v in timings.items():
+                if v > 0.05:
+                    self.store.metric(self.now, f"module_seconds:{k}", v)
 
     def run(self):
+        self._run_t0 = time.time()
         self.bind_world()
         while True:
             self.step_once()
@@ -164,10 +186,30 @@ class Controller:
                 self.store.metric(self.now, "advance_seconds", time.time() - t0)
                 self.store.metric(self.now, "credits_remaining", self.credits)
             if self.now % 1440 == 0:
-                log.info("%s  events=%d  credits=%.0f", fmt_minute(self.now), self.agg.events, self.credits)
+                day_wall = time.time() - getattr(self, "_day_t0", self._run_t0)
+                self._day_t0 = time.time()
+                with self.store.tx():
+                    self.store.metric(self.now, "wall_seconds_per_sim_day", day_wall)
+                log.info("%s  events=%d  credits=%.0f  day took %.1fs  rss=%.0fMB", fmt_minute(self.now),
+                         self.agg.events, self.credits, day_wall, _rss_mb())
         # final pass so the last chunk's events and decisions are recorded
         self.step_once()
         self.maybe_snapshot(force=True)
         with self.store.tx():
             self.store.decide(self.now, self.ts, None, "controller_finished", "scenario finished",
-                              {"events": self.agg.events, "credits_remaining": self.credits})
+                              {"events": self.agg.events, "credits_remaining": self.credits,
+                               "wall_seconds": round(time.time() - self._run_t0, 1), "peak_rss_mb": round(_peak_mb())})
+
+
+def _rss_mb() -> float:
+    try:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 2**20
+    except (OSError, ValueError):
+        return _peak_mb()
+
+
+def _peak_mb() -> float:
+    import resource
+    r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return r / 1024 if sys.platform != "darwin" else r / 2**20

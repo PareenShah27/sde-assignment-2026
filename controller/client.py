@@ -88,8 +88,32 @@ class SimClient:
     def chunks(self, kind: str, after: int = -1) -> list[dict]:
         return self._req("GET", "/events/chunks", params={"kind": kind, "after": after})
 
-    def chunk_lines(self, n: int) -> list[str]:
-        return self._req("GET", f"/events/chunks/{n}", raw=True).splitlines()
+    def chunk_lines(self, n: int):
+        """Stream a chunk's NDJSON lines. Chunks hold up to 250k events (~100 MB); loading one as a single string
+        and splitting it pinned ~5 GB of fragmented heap during the public_03 history bootstrap. Streaming keeps
+        memory bounded by the aggregates, not the chunk size. Retries restart the chunk from the beginning, so
+        callers must consume a chunk fully before folding it (Aggregates.ingest_lines does)."""
+        delay = 0.5
+        for attempt in range(self.retries):
+            try:
+                with self.http.stream("GET", f"/events/chunks/{n}") as r:
+                    if r.status_code >= 400:
+                        raise SimError(r.status_code, "chunk_error", r.read()[:200])
+                    # raw bytes, no text decoding (an undeclared charset can trigger detection over 100 MB);
+                    # json.loads takes bytes. Read fully before returning: a retry must not double-fold.
+                    lines, tail = [], b""
+                    for block in r.iter_bytes(1 << 20):
+                        parts = (tail + block).split(b"\n")
+                        tail = parts.pop()
+                        lines.extend(p for p in parts if p)
+                    if tail:
+                        lines.append(tail)
+                    return lines
+            except httpx.TransportError as e:
+                log.warning("chunk %d transport error (attempt %d): %s", n, attempt + 1, e)
+                time.sleep(delay)
+                delay = min(delay * 2, 10)
+        raise TransportError(f"giving up on chunk {n}")
 
     def approval(self, aid: str) -> dict:
         return self._req("GET", f"/approvals/{aid}")
