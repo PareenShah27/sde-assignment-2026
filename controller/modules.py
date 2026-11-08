@@ -6,10 +6,11 @@ from .cohorts import CohortPlanner
 from .governance import Governance
 from .incidents import Hallucination, SupervisorWatch
 from .schedule import Schedule
+from .variants import Variants
 from .verify import Verifier
 
 
 def build_modules(ctl):
-    schedule = Schedule()
+    schedule, variants = Schedule(), Variants()
     return [SupervisorWatch(), Hallucination(), CallerID(), Verifier(),
-            CohortPlanner([schedule]), schedule, Governance(ctl)]
+            CohortPlanner([variants, schedule]), variants, schedule, Governance(ctl)]

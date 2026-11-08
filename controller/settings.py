@@ -11,8 +11,10 @@ SNAPSHOT_EVERY_MINUTES = 360  # aggregates snapshot cadence (sim time). Restart 
 # ---- cohorts (C2)
 MIN_COHORT_SHARE = 0.04      # a cohort cell below 4% of traffic is merged into `default` (fragmentation guard)
 MAX_COHORTS = 16             # platform allows 20; leave headroom for supervisor-defined cohorts
-COHORT_GAIN_MIN = 0.004      # engagement split must be worth >= 0.4pp (absolute) to justify more cohorts
-COHORT_CHANGE_MIN_HOURS = 24  # cohort definitions change at most once a day (stability for supervisors)
+COHORT_GAIN_MIN = 0.008      # a feature split must be worth >= 0.8pp engagement (absolute), cross-fitted, AND
+                             # positive in both folds. 0.4pp let noise through: cohorts churned daily on public_02
+COHORT_CHANGE_MIN_HOURS = 72  # live cohorts change at most every 3 days (each change re-maps allocations and
+                              # costs a supervisor a re-read; daily churn was observed at 24h)
 
 # ---- variant experiments (C6/C7)
 PRIOR_STRENGTH = 40.0        # pseudo-connected calls pulling a cohort's arm toward the workflow-level arm rate
@@ -24,7 +26,10 @@ WINNER_PBEST = 0.95          # declare a winner at P(best) >= 0.95 ...
 WINNER_SHARE = 0.85          # ... it gets 85%; the rest monitors the runner-up (decay detection needs a comparator)
 INITIAL_INCUMBENT_SHARE = 0.4  # first exploration round keeps the business default at >= 40%
 DECAY_WINDOW_DAYS = 1.5      # short window for decay checks
-DECAY_PROB = 0.90            # P(leader < best alternative | short window) to trigger a rollback
+DECAY_DROP_Z = 2.5           # decay: the leader's advantage over the other arms fell by >= 2.5 SE ...
+DECAY_BEHIND_Z = 1.64        # ... and it is now behind them (one-sided 95%), having been ahead (z >= 1) before
+LEADER_SWITCH_P = 0.80       # a challenger takes the lead (most traffic) only at P(better than incumbent) >= 0.8
+MIN_COHORT_CONNECTED_PER_DAY = 150  # a cohort must expect >= 150 connected calls/day, else it folds into default
 HARM_TOLERANCE = 0.002       # never propose an allocation whose posterior-mean engagement is >0.2pp worse
 
 # ---- schedule / call time (C3/C4)

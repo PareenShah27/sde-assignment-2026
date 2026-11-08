@@ -1,7 +1,7 @@
-runs/
-__pycache__/
-*.pyc
-.venv/
-state/
-reports/*.json
 logs/
+*.pyc
+__pycache__/
+reports/*.json
+runs/
+state/
+.venv/

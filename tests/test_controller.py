@@ -208,3 +208,83 @@ def test_did_stats_flags_a_bad_number_within_hour_cells():
     s = robust_stats(w, 0, 1440)
     assert s["D2"]["ratio"] < 0.6 and s["D2"]["z"] < -3
     assert 0.8 < s["D1"]["ratio"] < 1.2          # ... which the second pass removes
+
+
+# ---------------------------------------------------------------- experiments
+def _post(n, x, prior=0.55):
+    import numpy as np
+    from controller.variants import Posterior
+    return Posterior(np.array(n, float), np.array(x, float), np.full(len(n), prior))
+
+
+def test_first_exposure_gets_exactly_the_explore_floor():
+    from controller import settings as S
+    from controller.variants import allocate
+    d, diag = allocate(_post([3000, 0, 0, 0], [1650, 0, 0, 0]), ["V1", "V2", "V3", "V4"], {"V1": 1.0})
+    assert diag["leader"] == "V1"                       # an untested arm never leads
+    assert all(abs(d[o] - S.EXPLORE_FLOOR) < 1e-9 for o in ("V2", "V3", "V4"))
+    assert abs(d["V1"] - (1 - 3 * S.EXPLORE_FLOOR)) < 1e-9
+
+
+def test_clear_winner_is_promoted_and_runner_up_kept_for_decay_monitoring():
+    from controller import settings as S
+    from controller.variants import allocate
+    d, diag = allocate(_post([2000, 2000, 2000], [1100, 1100, 1350]), ["W1", "W2", "W3"], {"W1": 0.8, "W2": 0.1, "W3": 0.1})
+    assert diag["winner"] == "W3" and abs(d["W3"] - S.WINNER_SHARE) < 1e-9 and len(d) == 2
+
+
+def test_allocation_is_deterministic():
+    from controller.variants import allocate
+    args = (_post([900, 400, 380], [500, 230, 200]), ["W1", "W2", "W3"], {"W1": 0.8, "W2": 0.1, "W3": 0.1})
+    assert allocate(*args) == allocate(*args)
+
+
+def test_aa_false_winner_rate_is_low():
+    import numpy as np
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("aa", "scripts/aa_test.py")
+    aa = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(aa)
+    winners, _, _ = aa.run(np.full(3, 0.55), sims=60, daily=1100, days=8, seed=11)
+    assert np.mean([w is not None for w in winners]) <= 0.05
+
+
+def _decay_ctl(tmp_path, rates_before, rates_after, now_day=6):
+    """Synthetic workflow: welcome W1/W2/W3, W3 leads at 80%; engagement per arm before/after day now-2."""
+    import types
+    from collections import defaultdict
+    import numpy as np
+    from controller.aggregates import WfAgg
+    from controller.store import Store
+    opts = {"welcome_message": ["W1", "W2", "W3"], "voice": ["V1"], "caller_id": ["D1"], "prompt_version": ["P1"]}
+    w = WfAgg("wf", opts)
+    rng = np.random.default_rng(5)
+    for d in range(now_day - 5, now_day + 1):
+        E = np.zeros((252, 3, 1, 1, 3), dtype=np.int32)
+        rates = rates_before if d < now_day - 1 else rates_after
+        for i, (share, r) in enumerate(zip((0.1, 0.1, 0.8), rates)):
+            n = int(1000 * share)
+            E[0, i, 0, 0, 0], E[0, i, 0, 0, 1] = n, rng.binomial(n, r)
+        w.eng[d] = E
+    cfg = {"cohorts": [], "prompt_version": "P1", "schedule": {},
+           "allocations": {"default": {"welcome_message": {"W1": 0.1, "W2": 0.1, "W3": 0.8},
+                                       "voice": {"V1": 1}, "caller_id": {"D1": 1}}}}
+    return types.SimpleNamespace(now=now_day * 1440 + 12 * 60, ts="t", store=Store(tmp_path / "db.sqlite"),
+                                 agg=types.SimpleNamespace(wf={"wf": w}), current={"wf": {"config": cfg}},
+                                 wfs={"wf": {}}, drafts=defaultdict(list))
+
+
+def test_decay_fires_when_a_winner_stops_winning(tmp_path):
+    from controller.variants import Variants
+    ctl = _decay_ctl(tmp_path, rates_before=(0.50, 0.50, 0.60), rates_after=(0.55, 0.55, 0.45))
+    Variants()._decay(ctl, "wf")
+    [d] = ctl.drafts["wf"]
+    assert d.kind == "variant_rollback" and d.urgent and d.risk_reducing
+    assert d.patch["allocations"]["default"]["welcome_message"].get("W3", 0) <= 0.15
+
+
+def test_decay_does_not_fire_for_an_arm_that_never_led(tmp_path):
+    from controller.variants import Variants
+    ctl = _decay_ctl(tmp_path, rates_before=(0.55, 0.55, 0.55), rates_after=(0.55, 0.55, 0.50))
+    Variants()._decay(ctl, "wf")
+    assert not ctl.drafts["wf"]   # never significantly ahead: the daily plan handles it, not an urgent rollback

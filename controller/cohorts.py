@@ -5,9 +5,9 @@ features (e.g. age_band x city_tier). Cells under MIN_COHORT_SHARE of traffic fo
 caps fragmentation. IDs are derived from the definition ("age_band=60+|city_tier=1"), so the same
 definition always has the same ID across config versions, in proposals, in the audit log and in the view.
 
-Each optimiser (schedule now, variant experiments later) reports which features it would split on and what
-that split is worth on the workflow's KPI. CohortPlanner merges those preferences into one target set, at
-most once per day (stability for supervisors), ordered so the primary KPI's optimiser wins ties.
+Each optimiser (call-time schedule, variant experiments) reports, per feature, what splitting on it is worth
+in leads concluded (cross-fitted, so noise doesn't look like structure). CohortPlanner adds those up, takes the
+top two features, and changes the live set at most once a day and only when clearly better (hysteresis).
 """
 from __future__ import annotations
 
@@ -34,16 +34,17 @@ def code_shares(w, days: int = 7) -> np.ndarray:
     return tot / tot.sum()
 
 
-def build(features: list[str], shares: np.ndarray) -> list[dict]:
-    """Product cells over `features`, dropping cells under MIN_COHORT_SHARE (they fall into default).
+def build(features: list[str], shares: np.ndarray, min_share: float | None = None) -> list[dict]:
+    """Product cells over `features`, dropping cells under min_share (they fall into default).
     Ordered largest-first; capped at MAX_COHORTS."""
+    floor = S.MIN_COHORT_SHARE if min_share is None else max(S.MIN_COHORT_SHARE, min_share)
     if not features:
         return []
     cells = []
     for combo in itertools.product(*[FEATURES[f] for f in features]):
         where = {f: [v] for f, v in zip(features, combo)}
         s = float(shares[cells_where(where)].sum())
-        if s >= S.MIN_COHORT_SHARE:
+        if s >= floor:
             cells.append((s, {"id": cohort_id(where), "where": where}))
     cells.sort(key=lambda x: (-x[0], x[1]["id"]))
     out = [c for _, c in cells[: S.MAX_COHORTS]]
@@ -67,8 +68,12 @@ def membership(cohorts: list[dict]) -> tuple[list[str], np.ndarray]:
 class CohortPlanner:
     """Decides the target cohort set per workflow (once per day) from the optimisers' preferences."""
 
+    HYSTERESIS = 0.8  # keep the current features unless the new choice is worth >25% more
+
     def __init__(self, scorers: list):
-        self.scorers = scorers  # objects with .feature_preference(ctl, wid) -> (features, gain_on_primary)
+        # scorers expose .name and .feature_gains(ctl, wid) -> {feature: expected relative gain in leads
+        # concluded from splitting on it} (0 / absent when the split isn't worth its own bar)
+        self.scorers = scorers
 
     def tick(self, ctl):
         ctl.cohort_target = getattr(ctl, "cohort_target", {})
@@ -82,28 +87,35 @@ class CohortPlanner:
         cached = ws.get("cohort_target")
         if cached and cached["day"] == day:
             return cached["cohorts"]
+        from .cfg import parse_when
         from .incidents import protected
         if protected(ctl, wid, "cohorts"):
             return cur
-        prefs = []
+        last_change = max((parse_when(v["applied_at"]) for v in ctl.store.config_versions(wid)
+                           if "cohorts" in v["changed_dims"] and v["applied_at"]), default=None)
+        if cur and last_change is not None and ctl.now - last_change < S.COHORT_CHANGE_MIN_HOURS * 60:
+            return cur  # stability: live cohorts change at most every COHORT_CHANGE_MIN_HOURS
+        score: dict[str, float] = {}
+        by: dict[str, dict] = {}
         for s in self.scorers:
-            feats, gain = s.feature_preference(ctl, wid)
-            if feats and gain > 0:
-                prefs.append((gain, s.name, feats))
-        prefs.sort(key=lambda x: -x[0])
-        chosen: list[str] = []
-        for _, _, feats in prefs:
-            for f in feats:
-                if f not in chosen and len(chosen) < 2:
-                    chosen.append(f)
-        shares = code_shares(ctl.agg.wf[wid])
-        target = build(chosen, shares)
-        # hysteresis: if the current set uses the same features, keep it verbatim (no churn from share drift)
+            for f, g in (s.feature_gains(ctl, wid) or {}).items():
+                if g > 0:
+                    score[f] = score.get(f, 0.0) + g
+                    by.setdefault(f, {})[s.name] = round(g, 4)
+        chosen = [f for f, _ in sorted(score.items(), key=lambda x: (-x[1], x[0]))[:2]]
         cur_feats = sorted({f for c in cur for f in c["where"]})
-        if cur and cur_feats == sorted(chosen):
-            target = cur
+        # hysteresis: churning cohorts costs an approval and confuses supervisors; keep what's live unless the
+        # new split is clearly better
+        if cur_feats and sum(score.get(f, 0) for f in cur_feats) >= self.HYSTERESIS * sum(score[f] for f in chosen):
+            chosen = cur_feats
+        w = ctl.agg.wf[wid]
+        shares = code_shares(w)
+        recent = [d for d in sorted(w.eng) if d < day][-3:]
+        daily_conn = (sum(float(w.eng[d][..., 0].sum()) for d in recent) / len(recent)) if recent else 0.0
+        min_share = S.MIN_COHORT_CONNECTED_PER_DAY / daily_conn if daily_conn else 1.0
+        target = cur if (cur and cur_feats == sorted(chosen)) else build(chosen, shares, min_share)
         ws["cohort_target"] = {"day": day, "cohorts": target, "features": chosen,
-                               "prefs": [{"gain": round(g, 4), "by": n, "features": f} for g, n, f in prefs]}
+                               "feature_scores": {f: {"total": round(v, 4), **by[f]} for f, v in score.items()}}
         with ctl.store.tx():
             ctl.store.save_wf_state(wid, ws)
             if [c["id"] for c in target] != [c["id"] for c in cur]:

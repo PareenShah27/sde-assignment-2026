@@ -205,12 +205,26 @@ class Schedule:
         feats, beta, g = best
         if g["engaged"] < S.SCHED_MIN_GAIN:
             feats = []
+        singles = {}
+        for r in results:
+            if len(r["features"]) == 1:
+                f = r["features"][0]
+                singles[f] = max(singles.get(f, 0.0), r["engaged"])
         ws["sched_pref"] = {"day": day, "features": feats, "beta": beta,
                             "gain_pickup_cf": round(g["pickup"], 4), "gain_business": round(g["engaged"], 4) if feats else 0.0,
+                            "singles": singles,
                             "top": sorted(results, key=lambda r: -r["engaged"])[:5], "history_days": len(rp.mats)}
         with ctl.store.tx():
             ctl.store.save_wf_state(wid, ws)
         return feats, ws["sched_pref"]["gain_business"]
+
+    def feature_gains(self, ctl, wid: str) -> dict[str, float]:
+        """Per-feature cross-fitted gain in leads concluded. Below SCHED_MIN_GAIN we don't ask for cohorts at
+        all (not worth an approval on its own); hour tables can still ride along on cohorts others want."""
+        feats, _ = self.feature_preference(ctl, wid)
+        if not feats:
+            return {}
+        return dict(ctl.store.wf_state(wid)["sched_pref"].get("singles") or {})
 
     # ---------------------------------------------------------------- drafts
     def tick(self, ctl):
