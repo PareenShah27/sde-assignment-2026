@@ -163,6 +163,16 @@ class Controller:
                 if v > 0.05:
                     self.store.metric(self.now, f"module_seconds:{k}", v)
 
+    def write_views(self):
+        """Static supervisor + health pages next to the store (no server needed to read them)."""
+        from .view import health, supervisor_view, to_html
+        try:
+            (self.state_dir / "supervisor.html").write_text(
+                to_html(supervisor_view(self.state_dir), "Supervisor view"))
+            (self.state_dir / "health.html").write_text(to_html(health(self.state_dir), "Loop health"))
+        except Exception:  # a view bug must never fail the run
+            log.exception("writing views failed")
+
     def run(self):
         self._run_t0 = time.time()
         self.bind_world()
@@ -195,6 +205,7 @@ class Controller:
         # final pass so the last chunk's events and decisions are recorded
         self.step_once()
         self.maybe_snapshot(force=True)
+        self.write_views()
         with self.store.tx():
             self.store.decide(self.now, self.ts, None, "controller_finished", "scenario finished",
                               {"events": self.agg.events, "credits_remaining": self.credits,

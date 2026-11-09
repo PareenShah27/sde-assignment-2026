@@ -152,7 +152,7 @@ class Hallucination:
                 st.decide(ctl.now, ctl.ts, wid, "incident_opened",
                           f"hallucination spike on {pv}: {flags}/{conn} flagged ({rate:.1%}) vs baseline "
                           f"{base:.1%} (p={p:.1e})", inc)
-                st.alert(ctl.now, "page", wid, "hallucination",
+                st.alert(ctl.now, "notify", wid, "hallucination",
                          f"{wid}: prompt {pv} flag rate {rate:.1%} vs {base:.1%}. Fix proposal is being prepared; "
                          f"check the approval queue and `python -m controller why --wf {wid}`.")
             self._respond(ctl, wid, ws, inc)

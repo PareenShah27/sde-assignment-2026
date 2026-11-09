@@ -125,7 +125,7 @@ class CallerID:
                 if new == "unhealthy":
                     st.alert(ctl.now, "notify", wid, f"did_unhealthy:{d}",
                              f"{wid}: caller ID {d} picks up at {s['ratio']:.0%} of the other numbers; rotating out.")
-                elif old == "unhealthy":
+                elif new == "healthy":  # a re-test (probing) is not a recovery; only clear on proven health
                     st.resolve_alert(ctl.now, wid, f"did_unhealthy:{d}")
         self._plan(ctl, wid, dids, stats)
 

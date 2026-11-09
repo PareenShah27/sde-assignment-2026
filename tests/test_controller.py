@@ -288,3 +288,41 @@ def test_decay_does_not_fire_for_an_arm_that_never_led(tmp_path):
     ctl = _decay_ctl(tmp_path, rates_before=(0.55, 0.55, 0.55), rates_after=(0.55, 0.55, 0.50))
     Variants()._decay(ctl, "wf")
     assert not ctl.drafts["wf"]   # never significantly ahead: the daily plan handles it, not an urgent rollback
+
+
+# ---------------------------------------------------------------- views
+def test_supervisor_and_health_views_render_from_store_only(ctl):
+    from controller.modules import build_modules
+    from controller.view import health, supervisor_view, to_html
+    ctl.modules = build_modules(ctl)
+    advance_to(ctl, 13 * 60)
+    ctl.maybe_snapshot(force=True)
+    md = supervisor_view(ctl.state_dir)
+    for section in ("How it's doing", "What we need from you", "What's being tested", "Changed without asking"):
+        assert section in md
+    assert "pickup" in md and "engagement" in md          # both KPIs, separately
+    h = health(ctl.state_dir)
+    assert "decision lag" in h and "Alerts" in h
+    assert to_html(md, "x").startswith("<!doctype html>")
+
+
+def test_unfixed_incident_escalates_to_a_page_and_clears_when_resolved(tmp_path):
+    import types
+    from controller.health import INCIDENT_PAGE_AFTER_MIN, LoopHealth
+    from controller.store import Store
+    st = Store(tmp_path / "db.sqlite")
+    agg = types.SimpleNamespace(wf={"wf": types.SimpleNamespace(last_call_minute=None)})
+    ctl = types.SimpleNamespace(store=st, agg=agg, credits=150, wfs={"wf": {"dialling_window": [9, 21]}}, now=600)
+    with st.tx():
+        st.save_wf_state("wf", {"incident": {"status": "open", "prompt": "P2", "opened": 600}})
+    LoopHealth().tick(ctl)
+    assert not st.db.execute("SELECT * FROM alerts WHERE severity='page'").fetchall()   # we're on it: no page yet
+    ctl.now = 600 + INCIDENT_PAGE_AFTER_MIN
+    LoopHealth().tick(ctl)
+    [(msg,)] = st.db.execute("SELECT message FROM alerts WHERE code='hallucination_unfixed' AND resolved_minute IS NULL")
+    assert "why --wf wf" in msg                                    # a page says what to look at
+    with st.tx():
+        st.save_wf_state("wf", {"incident": {"status": "resolved", "prompt": "P2", "opened": 600}})
+    ctl.now += 30
+    LoopHealth().tick(ctl)
+    assert not st.db.execute("SELECT * FROM alerts WHERE resolved_minute IS NULL").fetchall()
