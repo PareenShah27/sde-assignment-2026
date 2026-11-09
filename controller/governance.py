@@ -206,6 +206,9 @@ class Governance:
 
     # ================================================================== routing
     def route(self, ctl, wid: str, drafts: list[Draft]):
+        # Patches merge in order, later wins: put routine first so an urgent / risk-reducing draft (rollback,
+        # incident fix) can never be overridden by a routine plan drafted in the same cycle.
+        drafts = sorted(drafts, key=lambda d: (d.urgent, d.risk_reducing))
         wf = ctl.wfs[wid]
         gov = wf["governance"]
         pol = gov.get("auto_apply") or {}
@@ -239,7 +242,7 @@ class Governance:
             urgent = [d for d in manual if d.urgent and d.kind not in kinds_in_flight]
             routine = [d for d in manual if not d.urgent]
             if urgent:
-                self._request(ctl, wid, urgent + routine, urgent=True)
+                self._request(ctl, wid, routine + urgent, urgent=True)  # urgent last: it wins the merge
             elif routine and not approval_in_flight:
                 self._request(ctl, wid, routine, urgent=False)
 

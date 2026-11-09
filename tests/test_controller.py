@@ -326,3 +326,19 @@ def test_unfixed_incident_escalates_to_a_page_and_clears_when_resolved(tmp_path)
     ctl.now += 30
     LoopHealth().tick(ctl)
     assert not st.db.execute("SELECT * FROM alerts WHERE resolved_minute IS NULL").fetchall()
+
+
+def test_urgent_draft_wins_over_routine_draft_in_the_same_batch(ctl, monkeypatch):
+    """Regression: a routine plan (W3 80%) drafted in the same cycle overrode a decay re-test (W3 50%)."""
+    advance_to(ctl, 11 * 60 + 30)
+    gov = Governance(ctl)
+    sent = {}
+    monkeypatch.setattr(gov, "_submit", lambda c, wid, route, cur, new, drafts, body, urgent=False: sent.update(new=new))
+    urgent = Draft(wid="nw_renewal", kind="variant_rollback", summary="re-test W3", urgent=True, risk_reducing=True,
+                   patch={"allocations": {"default": {"welcome_message": {"W3": 0.5, "W2": 0.5}}}},
+                   rationale="r", dry_run={"x": 1})
+    routine = Draft(wid="nw_renewal", kind="variant_allocation", summary="plan",
+                    patch={"allocations": {"default": {"welcome_message": {"W3": 0.8, "W1": 0.2}}}},
+                    rationale="r", dry_run={"x": 1})
+    gov.route(ctl, "nw_renewal", [urgent, routine])      # urgent drafted first, routine second
+    assert sent["new"]["allocations"]["default"]["welcome_message"] == {"W2": 0.5, "W3": 0.5}

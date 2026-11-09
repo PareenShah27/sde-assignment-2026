@@ -76,6 +76,18 @@ class SupervisorWatch:
                 at = parse_when(v["applied_at"]) if v.get("applied_at") else ctl.now
                 for d in v["changed_dims"]:
                     prot[d] = at + 24 * 60
+                # options the supervisor took OUT of welcome/voice stay out of our exploration for 72h:
+                # after the 24h freeze we may tune among what they kept, not quietly re-add what they removed
+                byv = {x["version"]: x["config"] for x in ctl.store.config_versions(wid)}
+                old, new = byv.get(v["version"] - 1), byv.get(v["version"])
+                if old and new:
+                    from .cfg import cohort_ids, dist
+                    for d in ("welcome_message", "voice"):
+                        used = lambda c: {o for k in cohort_ids(c) for o, s in dist(c, k, d).items() if s > 0}
+                        removed = sorted(used(old) - used(new))
+                        if removed:
+                            ws.setdefault("sup_hold", {})[d] = {"options": removed, "until": at + 72 * 60,
+                                                                "version": v["version"]}
                 ws.setdefault("seen_supervisor_versions", []).append(v["version"])
                 with ctl.store.tx():
                     ctl.store.save_wf_state(wid, ws)

@@ -261,6 +261,14 @@ class Variants:
             if protected(ctl, wid, dim):
                 notes.append(f"{dim} frozen after a supervisor edit")
                 continue
+            if dim in (ws.get("rollbacks") or {}):
+                notes.append(f"{dim}: rollback in progress, left to it")
+                continue
+            hold = (ws.get("sup_hold") or {}).get(dim)
+            held = set(hold["options"]) if hold and hold["until"] > ctl.now else set()
+            if held:
+                notes.append(f"{dim}: {', '.join(sorted(held))} removed by the supervisor (v{hold['version']}), not re-tested")
+            retesting = (ws.get("retest") or {}).get(dim, -1) > ctl.now
             opts = w.opts[dim]
             dw = weights
             if (ws.get("retest") or {}).get(dim, -1) > ctl.now:
@@ -273,7 +281,8 @@ class Variants:
             for cid in ids:
                 post = posts[cid]
                 cur_d = dist(cfg, cid if cid in cohort_ids(cfg) else "default", dim)
-                tgt, diag = allocate(post, opts, cur_d, decayed, wf=wf_post)
+                # during a re-test the current leader gets no stickiness: it must re-earn the lead
+                tgt, diag = allocate(post, opts, {} if retesting else cur_d, decayed | held, wf=wf_post)
                 # harm guard: never propose something the posterior expects to be worse
                 e_cur, e_new = expected_rate(post, opts, cur_d), expected_rate(post, opts, tgt)
                 if e_new < e_cur - S.HARM_TOLERANCE:
